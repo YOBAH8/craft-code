@@ -1,0 +1,105 @@
+# Cursor-Based Pagination — Common Pitfalls
+
+---
+
+## ❌ Pitfall 1: Using a non-unique field as the sole cursor
+
+If you sort by `created_at` and use it as your only cursor field, records created at the same timestamp will cause items to be skipped or duplicated.
+
+**Wrong:**
+```js
+// If three posts have the same created_at, your cursor loses its position
+const cursor = encodeCursor({ created_at: lastItem.created_at })
+// Query: WHERE created_at < ?   ← skips items with identical timestamp
+```
+
+**Right:**
+```js
+// Always include a unique tiebreaker (usually the primary key)
+const cursor = encodeCursor({ created_at: lastItem.created_at, id: lastItem.id })
+// Query: WHERE (created_at < ?) OR (created_at = ? AND id < ?)
+```
+
+---
+
+## ❌ Pitfall 2: Exposing raw cursor internals
+
+Sending `cursor={"id":123,"created_at":"2024-01-15"}` directly lets clients manipulate pagination. They can craft cursors to access arbitrary positions in your data.
+
+Always base64-encode (or encrypt for sensitive data) the cursor:
+
+```js
+const cursor = Buffer.from(JSON.stringify({ id: 123 })).toString('base64url')
+```
+
+This doesn't prevent manipulation entirely, but it signals that the cursor is opaque and discourages casual tampering. For sensitive data, sign the cursor with HMAC.
+
+---
+
+## ❌ Pitfall 3: Not handling deleted records between pages
+
+If a user loads page 1, then an item from page 1 is deleted, and they load page 2 using the cursor of that deleted item — your query breaks or returns incorrect results.
+
+Handle this by:
+- Using `<=` instead of `<` and deduplicating on the client
+- Checking if the cursor record still exists and falling back gracefully
+- Designing your cursor around stable fields (like auto-increment IDs that are never reused)
+
+---
+
+## ❌ Pitfall 4: Fetching N+1 queries to determine `hasMore`
+
+A common mistake is doing two queries — one for data, one to count remaining items.
+
+**Wrong:**
+```js
+const data = await db('posts').limit(limit) // query 1
+const total = await db('posts').count()     // query 2 — expensive!
+const hasMore = data.length + offset < total
+```
+
+**Right:**
+```js
+// Fetch limit + 1 rows. If you get limit+1, there's a next page.
+const rows = await db('posts').limit(limit + 1)
+const hasMore = rows.length > limit
+const data = rows.slice(0, limit) // only return limit rows to the client
+```
+
+One query. No count. No extra round trip.
+
+---
+
+## ❌ Pitfall 5: Allowing users to jump to arbitrary pages
+
+Cursor pagination doesn't support "go to page 47." If your product requires page jumping, random access, or showing "page X of Y", cursor pagination is the wrong tool.
+
+Don't implement cursor pagination then try to bolt on page jumping — use offset pagination instead, or a hybrid (cursor for the feed, offset for admin/search).
+
+---
+
+## ❌ Pitfall 6: Not invalidating stale cursors
+
+Cursors can become invalid when:
+- The item the cursor points to is deleted
+- The sort order of the dataset changes
+- The underlying schema changes
+
+On the client, always handle a `400 Invalid cursor` response by resetting to the first page:
+
+```js
+if (response.status === 400) {
+  reset() // clear cursor, reload from beginning
+}
+```
+
+---
+
+## ❌ Pitfall 7: Forgetting to cap the limit parameter
+
+Without a cap, a client can request `limit=1000000` and exhaust your database.
+
+```js
+// Always clamp the limit — never trust the client
+const limit = Math.min(parseInt(req.query.limit) || 20, 100)
+```
