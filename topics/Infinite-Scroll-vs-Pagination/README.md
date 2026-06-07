@@ -6,6 +6,103 @@ Most developers pick one because they've seen it before, or because it's easier 
 
 ---
 
+## Running the Demo
+
+The demo is a Next.js app that shows **both patterns side by side** — a live paginated product list on the left, and a live infinite scroll list on the right, both hitting the same mock API.
+
+### Folder structure (this topic)
+
+```
+Infinite-Scroll-vs-Pagination/
+├── README.md              ← you are here
+├── pitfalls.md
+└── demo/
+    ├── package.json
+    ├── next.config.mjs
+    ├── tsconfig.json
+    └── src/
+        ├── app/
+        │   ├── layout.tsx
+        │   └── page.tsx
+        ├── components/
+        │   ├── ProductCard.tsx
+        │   └── SkeletonCard.tsx
+        └── lib/
+            └── mock-data.ts
+```
+
+### Steps to run
+
+```bash
+# 1. Navigate into the demo folder
+cd ~/Documents/craft-code/topics/Infinite-Scroll-vs-Pagination/demo
+
+# 2. Install dependencies
+npm install
+
+# 3. Start the dev server
+npm run dev
+```
+
+Then open your browser at **http://localhost:3000**
+
+> If port 3000 is taken, Next.js will automatically use 3001 — check your terminal output.
+
+---
+
+### What you'll see
+
+The demo has **four tabs** at the top right:
+
+| Tab | What it shows |
+|---|---|
+| **⊞ Side by Side** | Both patterns running simultaneously — the most useful view |
+| **Pagination** | Full-screen paginated grid with page controls |
+| **Infinite Scroll** | Full-screen infinite scroll with live fetch counter |
+| **📊 Tradeoffs** | Decision matrix + 360Market-specific recommendations |
+
+---
+
+### What to observe
+
+**In the Pagination panel:**
+- Click **Next →** and watch how the old page stays dimmed while the new one loads. This is `keepPreviousData` in action — without it the grid would flash empty for every page change.
+- Click a specific page number to jump directly. Notice the URL does *not* update — in a real app you'd add `?page=3` to the URL so users can bookmark and share this exact view.
+- Count how many items are in the DOM at once: always exactly 12. Memory stays flat no matter how many pages you browse.
+
+**In the Infinite Scroll panel:**
+- Scroll down slowly and watch the **fetch counter** in the top-right increment. Each fetch is triggered by `IntersectionObserver` — a sentinel `<div>` at the bottom of the list, not a scroll event listener.
+- Watch the **skeleton cards** appear *before* you hit the bottom — that's `rootMargin: '200px'` pre-fetching the next batch 200px before the sentinel enters the viewport. On a slow Zambian 4G connection, this eliminates the loading gap.
+- Keep scrolling until you reach the end. Notice: no page numbers, no way to jump to a position, no shareable URL.
+- Hit the browser **back button** after scrolling deep — you lose your position. This is the #1 UX complaint about infinite scroll.
+
+**In Side by Side view:**
+- Both panels share the same 200-product mock dataset.
+- Scroll the infinite scroll panel while leaving pagination on page 1. Both are in a consistent state simultaneously — this is what a real 360Market homepage (infinite scroll) + search results page (pagination) would behave like in the same browser session.
+
+---
+
+### Changing the simulated network speed
+
+Open `demo/src/lib/mock-data.ts` and find this line:
+
+```ts
+await delay(600 + Math.random() * 400); // 600–1000ms simulated latency
+```
+
+Change it to simulate different conditions:
+
+```ts
+await delay(100);   // Fast WiFi
+await delay(800);   // Typical Lusaka 4G
+await delay(2000);  // Slow 3G / loaded tower
+await delay(4000);  // Edge network / rural Zambia
+```
+
+Re-save the file (hot reload applies instantly). Then scroll the infinite scroll panel and feel the difference `rootMargin` pre-fetching makes at higher latencies.
+
+---
+
 ## The Mental Model First
 
 Before any code, ask this question:
@@ -245,8 +342,6 @@ public function index(Request $request)
 
 ## Frontend Implementation
 
-See the `/demo` folder for a full runnable Next.js example.
-
 ### Infinite Scroll with TanStack Query
 
 ```tsx
@@ -273,9 +368,6 @@ const products = data?.pages.flatMap((page) => page.data) ?? [];
 The right way to trigger "load more" — no scroll event listeners, no scroll position arithmetic:
 
 ```tsx
-// A sentinel element at the bottom of the list
-// When it enters the viewport, load the next page
-
 const sentinelRef = useRef<HTMLDivElement>(null);
 
 useEffect(() => {
