@@ -1,0 +1,298 @@
+# Pitfalls — Infinite Scroll vs Pagination
+
+The most common mistakes developers make when implementing either pattern.
+
+---
+
+## Pitfall 1: Using `OFFSET` for Infinite Scroll
+
+**What developers do:**
+
+```php
+// ❌ This breaks at scale and produces duplicate/missing items
+$page = $request->integer('page', 1);
+$products = Product::orderByDesc('created_at')
+    ->skip(($page - 1) * 20)
+    ->take(20)
+    ->get();
+```
+
+**Why it fails:**
+- At `OFFSET 10000`, PostgreSQL reads and discards 10,000 rows on every request
+- If a new product is inserted between page loads, every user sees a duplicate on the next page or skips an item
+- Infinite scroll with offset is the worst of both worlds — slow queries AND incorrect results
+
+**Fix:**
+
+```php
+// ✅ Cursor-based — fast at any depth, no duplicates
+if ($cursor) {
+    $decoded = json_decode(base64_decode($cursor), true);
+    $query->where(function ($q) use ($decoded) {
+        $q->where('created_at', '<', $decoded['created_at'])
+          ->orWhere(fn($q2) => $q2
+              ->where('created_at', $decoded['created_at'])
+              ->where('id', '<', $decoded['id'])
+          );
+    });
+}
+```
+
+---
+
+## Pitfall 2: Attaching Scroll Listeners Directly
+
+**What developers do:**
+
+```js
+// ❌ This runs on every single scroll event — hundreds of times per second
+window.addEventListener('scroll', () => {
+  const nearBottom =
+    window.scrollY + window.innerHeight >= document.body.scrollHeight - 100;
+  if (nearBottom && !loading) {
+    loadMore();
+  }
+});
+```
+
+**Why it fails:**
+- Scroll events fire continuously, causing massive CPU usage
+- Even with debounce, this is fragile and can fire multiple times
+- The scroll position arithmetic breaks inside scrollable containers (not `window`)
+
+**Fix:**
+
+```js
+// ✅ IntersectionObserver — browser-native, zero scroll event overhead
+const observer = new IntersectionObserver(
+  ([entry]) => {
+    if (entry.isIntersecting && hasNextPage) fetchNextPage();
+  },
+  { rootMargin: '200px' }
+);
+observer.observe(sentinelRef.current);
+```
+
+---
+
+## Pitfall 3: No Loading State Between Pages (Pagination)
+
+**What developers do:**
+
+```tsx
+// ❌ UI flashes empty while new page loads — jarring on slow connections
+const { data } = useQuery({
+  queryKey: ['products', page],
+  queryFn: () => fetchProducts(page),
+});
+
+return <ProductGrid products={data?.items ?? []} />;
+```
+
+**Why it fails:**
+- `data` becomes `undefined` when the query key changes (new page)
+- The grid flashes empty for the duration of the network request
+- On a 3G connection in Lusaka, that's 500–1500ms of an empty screen
+
+**Fix:**
+
+```tsx
+// ✅ keepPreviousData keeps old page visible until new page arrives
+const { data, isPlaceholderData } = useQuery({
+  queryKey: ['products', page],
+  queryFn: () => fetchProducts(page),
+  placeholderData: keepPreviousData,
+});
+
+return (
+  <div style={{ opacity: isPlaceholderData ? 0.5 : 1, transition: 'opacity 0.2s' }}>
+    <ProductGrid products={data?.items ?? []} />
+  </div>
+);
+```
+
+---
+
+## Pitfall 4: Infinite Scroll Without Virtualisation on Long Lists
+
+**What developers do:**
+
+```tsx
+// ❌ After 50 fetches × 20 items = 1,000 DOM nodes. Phones start choking.
+const allProducts = data?.pages.flatMap(page => page.data) ?? [];
+
+return (
+  <div>
+    {allProducts.map(p => <ProductCard key={p.id} product={p} />)}
+  </div>
+);
+```
+
+**Why it fails:**
+- Every appended item stays in the DOM forever
+- 500+ complex card components causes layout thrashing during scroll
+- On a 3GB RAM Android device, browser memory warnings appear around 300–500 cards
+
+**Fix:**
+
+```tsx
+// ✅ Only render what's visible — virtual list with @tanstack/react-virtual
+import { useVirtualizer } from '@tanstack/react-virtual';
+
+const rowVirtualizer = useVirtualizer({
+  count: hasNextPage ? allProducts.length + 1 : allProducts.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 120, // estimated card height in px
+  overscan: 5,
+});
+```
+
+---
+
+## Pitfall 5: Forgetting the Back Button
+
+**What developers do:**
+Implement infinite scroll, ship it, and users complain that pressing back loses their position.
+
+**Why it happens:**
+Browser history doesn't know about your JavaScript scroll position. When the user navigates away and comes back, the page starts at item 1.
+
+**Fix — two options:**
+
+**Option A (simple):** Use `sessionStorage` to save and restore scroll position:
+
+```ts
+// Save position on navigation away
+useEffect(() => {
+  return () => {
+    sessionStorage.setItem('productScrollY', window.scrollY.toString());
+    sessionStorage.setItem('productCursors', JSON.stringify(cursors));
+  };
+}, [cursors]);
+
+// Restore on mount
+useEffect(() => {
+  const savedY = sessionStorage.getItem('productScrollY');
+  if (savedY) window.scrollTo(0, parseInt(savedY));
+}, [data]);
+```
+
+**Option B (robust):** Use the native scroll restoration API:
+
+```ts
+if ('scrollRestoration' in history) {
+  history.scrollRestoration = 'manual';
+}
+```
+
+Then manage it explicitly. This approach is more reliable but requires more work.
+
+---
+
+## Pitfall 6: Triggering Multiple Simultaneous Fetches
+
+**What developers do:**
+
+```tsx
+// ❌ If the user scrolls fast, this fires 3× before the first response arrives
+useEffect(() => {
+  if (nearBottom) {
+    fetchNextPage(); // called 3 times, 3 duplicate requests
+  }
+}, [scrollPosition]);
+```
+
+**Why it fails:**
+- Race conditions between simultaneous page fetches
+- Duplicate API calls waste bandwidth (expensive on mobile data)
+- Items may appear duplicated if responses arrive out of order
+
+**Fix:**
+
+```tsx
+// ✅ Guard with isFetchingNextPage — TanStack Query sets this automatically
+useEffect(() => {
+  const observer = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting && hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
+    }
+  });
+  observer.observe(sentinelRef.current);
+  return () => observer.disconnect();
+}, [hasNextPage, isFetchingNextPage]); // re-register when these change
+```
+
+---
+
+## Pitfall 7: Single-Column Sort with Cursor Pagination
+
+**What developers do:**
+
+```sql
+-- ❌ Breaks when two rows have identical created_at timestamps
+SELECT * FROM products
+WHERE created_at < '2026-05-15 10:23:00'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+**Why it fails:**
+- If 5 products were created at exactly the same millisecond (bulk imports, seeding)
+- The cursor could skip some or return the same row twice
+- Silent data corruption in the pagination
+
+**Fix:**
+
+```sql
+-- ✅ Always use a unique tiebreaker as the second sort column
+SELECT * FROM products
+WHERE (created_at, id) < ('2026-05-15 10:23:00', 1847)
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+```
+
+Always composite-sort on `(your_sort_column, id)`. The `id` column is unique, sequential, and guaranteed to break ties.
+
+---
+
+## Pitfall 8: No Empty State or Error State
+
+**What developers do:**
+
+```tsx
+// ❌ Network errors silently produce an empty list
+// User doesn't know if there are no products, or if something failed
+return (
+  <div>
+    {products.map(p => <ProductCard key={p.id} product={p} />)}
+  </div>
+);
+```
+
+**Fix:**
+
+```tsx
+// ✅ Handle all states explicitly
+if (status === 'pending') return <SkeletonGrid />;
+
+if (status === 'error') return (
+  <ErrorState
+    message="Couldn't load products"
+    onRetry={() => refetch()}
+  />
+);
+
+if (products.length === 0) return (
+  <EmptyState message="No products found. Try adjusting your filters." />
+);
+
+return (
+  <>
+    {products.map(p => <ProductCard key={p.id} product={p} />)}
+    <div ref={sentinelRef} />
+    {isFetchingNextPage && <LoadingSpinner />}
+  </>
+);
+```
+
+Never let an error or empty result look the same as a loaded empty list.
