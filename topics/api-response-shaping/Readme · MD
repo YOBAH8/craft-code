@@ -1,0 +1,196 @@
+# 10 — API Response Shaping
+
+> **Send only what the client needs. Nothing more. Nothing less.**
+
+---
+
+## What is API Response Shaping?
+
+API Response Shaping is the practice of **transforming and filtering the data your API sends back** before it reaches the client.
+
+Instead of dumping a raw database row (with internal IDs, sensitive fields, snake_case columns, and irrelevant metadata) directly into the HTTP response, you explicitly define the shape of what goes out.
+
+This might sound obvious. It isn't. Most developers skip it when starting out — and they pay for it later.
+
+---
+
+## The Problem It Solves
+
+Imagine a `users` table in PostgreSQL:
+
+```
+id | email | password_hash | role | created_at | updated_at | internal_notes | stripe_customer_id
+```
+
+Without response shaping, a naive API returns **all of it**.
+
+Now your frontend has `password_hash` and `stripe_customer_id` floating around in state. Your client knows more about your DB schema than it should. You've accidentally over-exposed data. And when you rename a column in your DB, the API breaks the client silently.
+
+Response shaping closes this gap.
+
+---
+
+## Core Techniques
+
+### 1. Field Selection (Explicit Allow-lists)
+
+Instead of returning everything, you define exactly which fields are included:
+
+```js
+// ❌ Bad — raw DB row goes out
+return res.json(user);
+
+// ✅ Good — shaped output
+return res.json({
+  id: user.id,
+  name: user.name,
+  email: user.email,
+  avatarUrl: user.avatar_url,
+});
+```
+
+### 2. Key Renaming (snake_case → camelCase)
+
+Your database uses `snake_case`. Your frontend uses `camelCase`. Without shaping, your client sees `created_at`, `avatar_url`, `is_active`. With shaping, it gets clean JavaScript:
+
+```js
+function shapeUser(user) {
+  return {
+    id: user.id,
+    fullName: user.full_name,
+    avatarUrl: user.avatar_url,
+    createdAt: user.created_at,
+    isActive: user.is_active,
+  };
+}
+```
+
+### 3. Computed Fields
+
+You can add derived values that don't exist as columns:
+
+```js
+function shapeUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    // Computed — doesn't exist in DB
+    initials: user.name.split(' ').map(n => n[0]).join('').toUpperCase(),
+    memberSince: new Date(user.created_at).getFullYear(),
+  };
+}
+```
+
+### 4. Role-Based Shaping
+
+Different clients (admin vs public user vs third-party) should get different shapes:
+
+```js
+function shapeUser(user, viewerRole) {
+  const base = {
+    id: user.id,
+    name: user.name,
+    avatarUrl: user.avatar_url,
+  };
+
+  if (viewerRole === 'admin') {
+    return {
+      ...base,
+      email: user.email,
+      role: user.role,
+      lastLogin: user.last_login_at,
+    };
+  }
+
+  return base;
+}
+```
+
+### 5. Nested / Relational Shaping
+
+When your query joins tables, shape each nested resource too:
+
+```js
+function shapePost(post) {
+  return {
+    id: post.id,
+    title: post.title,
+    body: post.body,
+    author: {
+      id: post.author_id,
+      name: post.author_name,
+      avatarUrl: post.author_avatar_url,
+    },
+    tags: post.tags.map(t => ({ id: t.id, label: t.name })),
+    publishedAt: post.published_at,
+  };
+}
+```
+
+### 6. Envelope / Pagination Wrapper
+
+A consistent response envelope makes it easy for clients to handle pagination, errors, and metadata:
+
+```js
+function paginated(data, total, page, pageSize) {
+  return {
+    data,
+    meta: {
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    },
+  };
+}
+```
+
+---
+
+## When to Use It
+
+| Situation | Use Response Shaping? |
+|---|---|
+| Any public API | ✅ Always |
+| Any API with auth | ✅ Always |
+| Internal microservices (same team) | ✅ Recommended |
+| Quick prototyping / dev-only endpoints | ⚠️ Maybe skip for speed |
+
+---
+
+## Where to Put Shapers
+
+There are a few patterns for organising your shapers depending on your stack:
+
+**Next.js API Routes / Route Handlers** → put shapers in `lib/shapers/` or `utils/shapers/`
+
+**Laravel** → use API Resources (`php artisan make:resource UserResource`)
+
+**Express/Node** → shapers in `src/mappers/` or `src/transformers/`
+
+**GraphQL** → resolvers handle shaping by design
+
+---
+
+## Real-World Context
+
+Every serious API you've used does this. Stripe never sends you their internal DB columns. GitHub's REST API shapes every response. Shopify's API has versioned resource shapes. This pattern is the difference between an API that exposes your data model and an API that exposes your product's contract.
+
+---
+
+## Key Takeaway
+
+> **Your API is a contract. Your database is an implementation detail. Response shaping keeps them separate.**
+
+When the DB changes, update the shaper. The contract stays stable. The client stays unbroken.
+
+---
+
+## Files in This Topic
+
+| File | What it covers |
+|---|---|
+| `README.md` | Concept, techniques, when to use it |
+| `example.js` | Clean shaper functions you can copy |
+| `pitfalls.md` | Common mistakes when shaping responses |
+| `demo/` | Next.js demo with shaped vs unshaped API routes |
