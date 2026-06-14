@@ -47,8 +47,8 @@ Every topic folder contains:
 | 06 | [Stale-While-Revalidate (SWR)](./topics/stale-while-revalidate/) | ⭐⭐ | ✅ Ready |
 | 07 | [Request Deduplication](./topics/request-deduplication/) | ⭐⭐⭐ | ✅ Ready |
 | 08 | [Cursor-Based Pagination](./topics/Cursor-Based-Pagination/) | ⭐⭐⭐ | ✅ Ready |
- 08 | [Infinite Scroll vs Pagination](./topics/Infinite-Scroll-vs-Pagination/) | ⭐⭐⭐ | ✅ Ready |
-| 10 | API Response Shaping | ⭐⭐ | 🔜 Coming |
+ 09 | [Infinite Scroll vs Pagination](./topics/Infinite-Scroll-vs-Pagination/) | ⭐⭐⭐ | ✅ Ready |
+| 10 | [API Response Shaping](./topics/api-response-shaping/) | ⭐⭐⭐ | ✅ Ready |
 
 ### 🏗️ Architecture & Patterns
 | # | Topic | Difficulty | Status |
