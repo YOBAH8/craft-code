@@ -1,0 +1,160 @@
+# Pitfalls — API Response Shaping
+
+Common mistakes developers make when shaping (or not shaping) API responses.
+
+---
+
+## 1. Returning the raw DB row directly
+
+```js
+// ❌ Exposing password_hash, internal_notes, stripe_customer_id to the client
+return res.json(user);
+
+// ✅ Shape it first
+return res.json(shapeUser(user));
+```
+
+**Why it matters:** You've now leaked your DB schema AND sensitive data to every client that calls this endpoint. You'll have to change clients when you change your schema.
+
+---
+
+## 2. Shaping inconsistently across endpoints
+
+```js
+// ❌ GET /users returns { avatarUrl }
+// ❌ GET /users/:id returns { avatar_url }
+// ❌ GET /me returns { profilePicture }
+```
+
+Three endpoints, three different field names for the same thing. The client now needs to handle all three cases.
+
+**Fix:** Create a single `shapeUser()` function and use it everywhere. One shape, one contract.
+
+---
+
+## 3. Shaping in the wrong layer
+
+```js
+// ❌ Shaping inside a SQL query — tightly coupled
+const user = await db.query(`
+  SELECT id, full_name AS "fullName", avatar_url AS "avatarUrl" FROM users
+`);
+
+// ❌ Shaping on the frontend — sensitive data already sent over the wire
+const safeUser = { id: user.id, name: user.name }; // strip in the client
+
+// ✅ Shape in the API layer (route handler or controller)
+const user = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+return res.json(shapeUser(user.rows[0]));
+```
+
+Shaping in SQL makes your queries fragile. Shaping on the frontend means you've already exposed the raw data.
+
+---
+
+## 4. Forgetting to shape nested/joined data
+
+```js
+// ❌ Author is raw DB data nested inside the post
+return res.json({
+  id: post.id,
+  title: post.title,
+  author: {
+    id: post.author_id,
+    name: post.author_name,
+    password_hash: post.author_password_hash, // 💀
+  },
+});
+
+// ✅ Shape each nested resource
+return res.json(shapePost(post)); // shapePost calls shapeAuthor internally
+```
+
+---
+
+## 5. Treating computed fields as DB responsibilities
+
+```js
+// ❌ Storing `initials`, `full_name`, `member_since_year` as columns
+// — means you sync them on every update, they can drift
+
+// ✅ Compute at the API shaping layer — always accurate
+function shapeUser(user) {
+  return {
+    ...
+    initials: user.name.split(' ').map(n => n[0]).join('').toUpperCase(),
+    memberSince: new Date(user.created_at).getFullYear(),
+  };
+}
+```
+
+---
+
+## 6. No response envelope for lists
+
+```js
+// ❌ Just returning an array
+return res.json(users.map(shapeUser));
+
+// Client has no idea how many total records exist.
+// They can't paginate. They can't show "Page 3 of 12".
+
+// ✅ Wrap in an envelope
+return res.json(paginatedResponse(users.map(shapeUser), total, page, pageSize));
+```
+
+---
+
+## 7. Changing field names without versioning
+
+Your API is a public contract. If your frontend or mobile app expects `avatarUrl` and you rename it to `profileImage` in the shaper, the client breaks.
+
+**Fix:** Version your API (`/api/v1/`, `/api/v2/`) or maintain backwards compatibility by keeping old field names until all clients migrate.
+
+---
+
+## 8. Shaping at the ORM model level only
+
+ORMs like Prisma let you `select` specific fields. That's great for query efficiency, but it's not enough — it doesn't rename fields, add computed values, or enforce role-based visibility.
+
+```js
+// ✅ Use Prisma select for DB efficiency
+const user = await prisma.user.findUnique({
+  where: { id },
+  select: { id: true, name: true, email: true, avatar_url: true, created_at: true },
+});
+
+// ✅ Then still run it through your shaper
+return res.json(shapeUser(user));
+```
+
+Think of the Prisma `select` as a first-pass filter. The shaper does the final transform.
+
+---
+
+## 9. Over-shaping: creating too many shaper variants
+
+```js
+// ❌ Too many bespoke shapers
+shapeUserForDashboard()
+shapeUserForProfile()
+shapeUserForSearch()
+shapeUserForEmails()
+shapeUserForMobileApp()
+```
+
+If you end up with ten shaper variants for the same resource, it's a sign that your base shaper is too rigid. Use a role/context argument instead, or compose from a base shaper.
+
+---
+
+## Summary
+
+| Pitfall | Quick Fix |
+|---|---|
+| Raw DB row returned | Always call `shapeX()` before `res.json()` |
+| Inconsistent field names | One shaper per resource, used everywhere |
+| Shaping in SQL / on client | Shape in the API layer only |
+| Forgetting nested data | Each nested resource gets its own shaper |
+| Arrays with no envelope | Use `paginatedResponse()` wrapper |
+| Rename fields without care | Version your API or maintain backwards compat |
+| Skipping shaper after Prisma select | Prisma select ≠ response shaping |
