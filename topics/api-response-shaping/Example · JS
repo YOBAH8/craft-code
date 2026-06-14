@@ -1,0 +1,195 @@
+/**
+ * Topic 10 — API Response Shaping
+ * craft-code by John Yobah
+ *
+ * Shaper functions: transform raw DB rows into clean, safe API responses.
+ * Copy these patterns into any Node.js / Next.js / Express project.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. BASIC USER SHAPER
+//    Strips sensitive fields. Renames snake_case → camelCase.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @param {Object} user - Raw row from the `users` table
+ * @returns {Object} Safe, client-ready user object
+ */
+function shapeUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    avatarUrl: user.avatar_url,        // renamed
+    isActive: user.is_active,          // renamed
+    createdAt: user.created_at,        // renamed
+    // ❌ NOT included: password_hash, stripe_customer_id,
+    //                  internal_notes, role (unless admin)
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. ROLE-BASED SHAPER
+//    Different viewers get different shapes of the same resource.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @param {Object} user       - Raw DB user row
+ * @param {'admin'|'public'} viewerRole - Who is requesting
+ * @returns {Object} Shaped user appropriate for the viewer
+ */
+function shapeUserForViewer(user, viewerRole) {
+  // Base shape — always safe to expose
+  const base = {
+    id: user.id,
+    name: user.name,
+    avatarUrl: user.avatar_url,
+    memberSince: new Date(user.created_at).getFullYear(),
+  };
+
+  // Admin gets extra fields
+  if (viewerRole === 'admin') {
+    return {
+      ...base,
+      email: user.email,
+      role: user.role,
+      isActive: user.is_active,
+      lastLogin: user.last_login_at,
+      internalNotes: user.internal_notes,
+    };
+  }
+
+  return base;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. COMPUTED FIELDS SHAPER
+//    Derive values at the API layer — not in the DB, not in the client.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function shapeUserWithComputed(user) {
+  const nameParts = (user.name || '').split(' ');
+
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    avatarUrl: user.avatar_url,
+    // Computed fields
+    initials: nameParts.map(n => n[0]).join('').toUpperCase().slice(0, 2),
+    memberSince: new Date(user.created_at).getFullYear(),
+    isNewMember: Date.now() - new Date(user.created_at) < 30 * 24 * 60 * 60 * 1000,
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. NESTED / RELATIONAL SHAPER
+//    Shape joined data — each resource has its own shaper.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function shapeTag(tag) {
+  return {
+    id: tag.id,
+    label: tag.name,
+    slug: tag.slug,
+  };
+}
+
+function shapeAuthor(post) {
+  return {
+    id: post.author_id,
+    name: post.author_name,
+    avatarUrl: post.author_avatar_url,
+  };
+}
+
+/**
+ * @param {Object} post - Raw joined post row (includes author columns + tags array)
+ * @returns {Object} Shaped post ready for the client
+ */
+function shapePost(post) {
+  return {
+    id: post.id,
+    title: post.title,
+    excerpt: post.excerpt,
+    slug: post.slug,
+    author: shapeAuthor(post),
+    tags: (post.tags || []).map(shapeTag),
+    publishedAt: post.published_at,
+    readTimeMinutes: Math.ceil((post.word_count || 0) / 200),
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. LIST + PAGINATION ENVELOPE
+//    Wrap shaped arrays in a consistent response envelope.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @param {Array}  data      - Already-shaped array of items
+ * @param {number} total     - Total records in DB (before pagination)
+ * @param {number} page      - Current page (1-indexed)
+ * @param {number} pageSize  - Items per page
+ * @returns {Object} Paginated envelope
+ */
+function paginatedResponse(data, total, page, pageSize) {
+  return {
+    data,
+    meta: {
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+      hasNextPage: page * pageSize < total,
+      hasPrevPage: page > 1,
+    },
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. USAGE EXAMPLE — Next.js Route Handler (App Router)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/*
+// app/api/users/route.js
+
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { shapeUser, paginatedResponse } from '@/lib/shapers/user';
+
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const page = parseInt(searchParams.get('page') || '1');
+  const pageSize = 20;
+  const offset = (page - 1) * pageSize;
+
+  const [users, [{ count }]] = await Promise.all([
+    db.query('SELECT * FROM users LIMIT $1 OFFSET $2', [pageSize, offset]),
+    db.query('SELECT COUNT(*) FROM users'),
+  ]);
+
+  return NextResponse.json(
+    paginatedResponse(users.rows.map(shapeUser), parseInt(count), page, pageSize)
+  );
+}
+*/
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPORTS — use these in your project
+// ─────────────────────────────────────────────────────────────────────────────
+
+module.exports = {
+  shapeUser,
+  shapeUserForViewer,
+  shapeUserWithComputed,
+  shapePost,
+  shapeTag,
+  shapeAuthor,
+  paginatedResponse,
+};
